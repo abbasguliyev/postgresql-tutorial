@@ -271,22 +271,56 @@ SELECT price * 1.18 AS price_with_vat FROM products ORDER BY price_with_vat DESC
 
 ### 1.2 WHERE — filtrləmə
 
+**`BETWEEN`** — iki dəyər arasında olub-olmadığını yoxlayır, sərhədlər **daxil** olmaqla:
 ```sql
 SELECT * FROM products WHERE price BETWEEN 100 AND 200;
-SELECT * FROM customers WHERE country IN ('AZ','TR');
-SELECT * FROM products WHERE name LIKE 'Product 1%';   -- böyük/kiçik həssas
-SELECT * FROM products WHERE name ILIKE 'product 1%';  -- həssas deyil
-SELECT * FROM orders WHERE status <> 'cancelled';
-SELECT * FROM products WHERE category_id IS NULL;      -- NULL üçün mütləq IS
+-- eynidir: WHERE price >= 100 AND price <= 200
 ```
 
-**NULL haqqında kritik qayda:** `NULL` "naməlum" deməkdir, "boş" yox. `NULL = NULL` → `NULL` (nə true, nə false). Ona görə həmişə `IS NULL` / `IS NOT NULL` istifadə et. `NULL`-ları müqayisədə nəzərə almaq üçün `IS DISTINCT FROM` var:
+**`IN`** — dəyərin verilmiş siyahıdan biri olub-olmadığını yoxlayır (çoxlu `OR`-un qısa forması):
+```sql
+SELECT * FROM customers WHERE country IN ('AZ','TR');
+-- eynidir: WHERE country = 'AZ' OR country = 'TR'
+```
+
+**`LIKE` / `ILIKE`** — mətndə naxış (pattern) axtarışı. İki xüsusi simvol var: `%` (istənilən sayda, 0 daxil, istənilən simvol) və `_` (dəqiq bir simvol). Bunları pattern daxilində **istənilən yerdə** (əvvəl, orta, son, hətta bir neçə dəfə) yaza bilərsən:
+
+| Pattern | Mənası |
+|---|---|
+| `'Product 1%'` | `'Product 1'` ilə **başlayan** |
+| `'%Product'` | `'Product'` ilə **bitən** |
+| `'%Product%'` | içində `'Product'` **olan hər yerdə** |
+| `'Product_1'` | `Product` + dəqiq **bir** simvol + `1` |
 
 ```sql
-SELECT NULL = NULL;              -- NULL
-SELECT NULL IS NULL;             -- true
-SELECT 5 IS DISTINCT FROM NULL;  -- true (NULL-ı da müqayisə edir)
+SELECT * FROM products WHERE name LIKE 'Product 1%';   -- böyük/kiçik həssas
+SELECT * FROM products WHERE name ILIKE 'product 1%';  -- həssas deyil (I = insensitive)
 ```
+Praktiki qayda: istifadəçi axtarışı üçün adətən `ILIKE`, dəqiq uyğunluq lazım olanda `LIKE`.
+
+**`<>`** (və ya `!=`) — "bərabər deyil":
+```sql
+SELECT * FROM orders WHERE status <> 'cancelled';
+```
+
+**`IS NULL` / `IS NOT NULL`** — `NULL`-u yoxlamağın **yeganə düzgün** yoludur:
+```sql
+SELECT * FROM products WHERE category_id IS NULL;
+```
+
+**NULL haqqında kritik qayda:** `NULL` "naməlum" deməkdir, "boş" yox. SQL-də məntiq iki yox, **üç** dəyərlidir: `true`, `false`, `NULL`. `NULL = NULL` → `NULL` (nə true, nə false) — çünki `=` **dəyərləri müqayisə edən** adi operatordur və tərəflərdən biri naməlum olanda nəticə də naməlum olur. `IS` isə fərqlidir: bu, məhz "NULL-durmu?" sualı üçün yaradılmış **xüsusi** operatordur, dəyəri yox vəziyyəti yoxlayır, ona görə həmişə qəti (`true`/`false`) cavab verir:
+
+```sql
+SELECT NULL = NULL;              -- NULL   (məlum deyil)
+SELECT NULL IS NULL;             -- true
+SELECT 5 IS DISTINCT FROM NULL;  -- true (NULL-ı da "normal dəyər" kimi müqayisə edir)
+```
+
+**Tələ — `NOT IN` və `NULL`:** əgər siyahıda (və ya alt-sorğuda) bir dənə belə `NULL` varsa, `NOT IN` **bütün nəticəni boşaldır**, heç xəta da vermədən:
+```sql
+SELECT * FROM products WHERE category_id NOT IN (1, 2, NULL);
+```
+Bu daxildə `category_id <> 1 AND category_id <> 2 AND category_id <> NULL` kimi işləyir. Sonuncu hissə (`<> NULL`) həmişə `NULL` verir, `AND` zənciri də ona görə hər sətir üçün `NULL` olur, `WHERE` isə `NULL`-u rədd edir → sorğu tamamilə boş qayıdır. Bu, real layihələrdə tez-tez rast gəlinən, saatlarla çaşdıran bir bugdır. Həll yolu (`NOT EXISTS`) Faza 2.3-də.
 
 ### 1.3 Data tipləri — düzgün seçim
 
