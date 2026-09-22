@@ -64,6 +64,23 @@ PostgreSQL **proses əsaslıdır** (thread yox, hər əlaqə üçün ayrı prose
 - **WAL (Write-Ahead Log)** — hər dəyişiklik əvvəl loga yazılır, sonra data faylına. Bu, qəza bərpasının (crash recovery) və replikasiyanın əsasıdır.
 - **Cluster / Database / Schema:** bir server instansı bir **cluster**-dir; cluster içində çox **database**; hər database içində çox **schema**; schema içində cədvəllər, funksiyalar və s.
 
+### 0.2.1 Sadə addım-addım: bir `UPDATE` içəridə necə işləyir?
+
+> Tam, diaqramlı və dərin versiya: [`1-giris.md`](1-giris.md) (bölmə 5). Bura yalnız qısa xülasədir.
+
+İki əsas yeri yadda saxla: **RAM** (sürətli, işıq kəsilsə silinir) və **SSD/disk** (yavaş, işıq kəsilsə belə qalır). Data qovluğunda iki alt-qovluq var: `base/` (cədvəllərin əsl datası) və `pg_wal/` (dəyişiklik "gündəliyi").
+
+```sql
+UPDATE products SET price = 12.00 WHERE id = 1;
+```
+1. Sətrin səhifəsi RAM-dakı `shared_buffers` keşindən (yoxdursa SSD-dən) tapılır.
+2. Dəyişiklik **RAM-da** edilir: köhnə sətir "dead tuple" işarələnir, yeni sətir əlavə olunur. Bu səhifə indi **dirty**dir — SSD-dəki `base/` fayl hələ köhnədir.
+3. Dəyişikliyin qısa qeydi (SQL mətni yox, fiziki dəyişiklik) RAM-dakı **WAL buferinə** yazılır.
+4. `COMMIT` olanda (psql-də hər cümlə avtomatik `BEGIN;...COMMIT;` içindədir) — bu qeyd **`fsync` ilə SSD-dəki `pg_wal`-a** yazılır. Yalnız bundan sonra "OK" cavabı qayıdır — bu andan dəyişiklik daimidir.
+5. **Ayrıca, bir az sonra:** Background Writer/Checkpointer RAM-dakı dirty page-i götürüb SSD-dəki `base/` faylına yazır.
+
+Niyə iki addım (4 və 5) ayrıdır? WAL-a yazmaq ardıcıl və sürətlidir, əsas fayla yazmaq təsadüfi və yavaşdır — `COMMIT` yalnız sürətli WAL yazısını gözləyir, əsas faylın yenilənməsi arxa planda baş verir.
+
 ### 0.3 Quraşdırma
 
 **Ubuntu/Debian:**
@@ -242,6 +259,39 @@ ANALYZE;  -- planner üçün statistikanı yenilə
 ```
 
 İndi 5000 müştərin, 2000 məhsulun, 20000 sifarişin var. Real ölçüdə təcrübə üçün kifayətdir.
+
+### Bu INSERT-lərdə işlənən SQL mexanizmləri — ətraflı
+
+Yuxarıdakı test datası skriptində bir neçə vacib, tez-tez rast gəlinən SQL mexanizmi var. Onları ayrıca izah edək.
+
+**`||` — mətn birləşdirmə (concatenation):**
+```sql
+SELECT 'Customer ' || 5;   -- 'Customer 5'
+```
+İki (və ya çox) mətn parçasını bir-birinə "calayır". Ədəd kimi tiplər avtomatik mətnə çevrilir. `'user' || g || '@example.com'` — üç hissəni ardıcıl birləşdirir: `'user'` + `g` (məs. `5`) + `'@example.com'` → `'user5@example.com'`.
+
+**Massiv (array) indeksi:**
+```sql
+(ARRAY['AZ','TR','US','DE','GB'])[1 + (g % 5)]
+```
+`ARRAY['AZ','TR','US','DE','GB']` — 5 elementli sadə bir siyahıdır. **Vacib qayda:** PostgreSQL-də massiv indeksi **1**-dən başlayır (0-dan yox). `%` — **qalıq (modulo)** operatorudur, bir ədədi digərinə bölüb qalanı tapır; `g % 5` nəticəsi həmişə `0-4` arasıdır, ona `1` əlavə edirik ki, nəticə massiv indeksinə uyğun **1-5** arası olsun. Beləliklə `g` artdıqca, nəticə `AZ→TR→US→DE→GB` dövrü ilə təkrarlanır — data bu 5 dəyər arasında bərabər paylanır. Bu, `random()`-dan fərqli olaraq **deterministikdir** (hər işlətmədə eyni nəticə).
+
+**`random()`:**
+```sql
+random() * 490 + 10
+```
+`random()` — hər çağırışda **0 ilə 1 arası** (0 daxil, 1 xaric) təsadüfi onluq ədəd qaytarır. Bunu istədiyin diapazona çevirmək üçün vurma/toplama işlədilir: `× 490` → `0-490` arası, `+ 10` → `10-500` arası.
+
+**`::` — tip çevrilməsi (cast):**
+```sql
+SELECT '123'::int;   -- eynidir: SELECT CAST('123' AS int);
+```
+`::` PostgreSQL-in `CAST(dəyər AS tip)` üçün qısa yazılışıdır. Skriptdə iki yerdə var:
+- `(random() * 490 + 10)::numeric` — `random()`-un nəticəsi float-dır, `numeric`-ə çeviririk ki, `round(..., 2)` dəqiq işləsin (pul üçün həmişə `numeric`, `float` yox — bax 1.3).
+- `(random() * 200)::int` — `stock` sütunu `int` olduğu üçün, float nəticəni tam ədədə çeviririk. **Diqqət:** float-dan `int`-ə çevirəndə PostgreSQL **ən yaxın tam ədədə yuvarlaqlaşdırır** (kəsmir) — `143.827` → `144`.
+
+**`ANALYZE`:**
+Cədvəli skan edib (nümunə əsasında) **statistika** toplayır — sütunlarda neçə fərqli dəyər var, dəyərlər necə paylanıb, təxminən neçə sətir var. Bu statistika PostgreSQL-in sorğu planlaşdırıcısına ("bu şərtə uyğun sətirləri tapmaq üçün indeksdən istifadə edim, yoxsa bütün cədvəli oxuyum?") kömək edir. Böyük həcmdə data əlavə etdikdən sonra köhnə statistika etibarsız olur — `ANALYZE` onu yeniləyir. Dərinliyi Faza 5-də (`EXPLAIN ANALYZE`, query planner).
 
 ---
 
